@@ -20,43 +20,79 @@ async function setupTable({datasetName, tableName}) {
     return table;
 }
 
-(async () => {
+function deleteKeyword(t, keyword){
+    return t.replace(new RegExp(`(^| )${keyword}($| )`,"g")," ").trim()
+}
 
-    const table = await setupTable({
-        datasetName: 'search_keyword_study_data',
-        tableName: 'search_keyword_graph'
-    });
-
-    const service = 'naver';
-    const keyword = "아이유";
-    const naverSearchUrl = 'https://search.naver.com/search.naver';
+async function getRelatedKeywords({service, keyword, searchUrl, paramName}){
     const userAgentString = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/69.0.3497.100 Safari/537.36';
-    const KeywordDeleteRegex = new RegExp(keyword,"g");
 
-    try{
-        const response = await axios.get(naverSearchUrl, {
-            params: {
-                query: keyword
-            },
-            headers: {
-                'user-agent' : userAgentString
-            },
-            timeout: 3000
+    const response = await axios.get(searchUrl, {
+        params: {
+            [paramName]: keyword
+        },
+        headers: {
+            'user-agent' : userAgentString
+        },
+        timeout: 3000
+    });
+    const $html = $(response.data);
+    const $links = $html.find(".sp_keyword .lst_relate li a");
+
+    return Array.from($links.map((i, link) => {
+        return deleteKeyword($(link).text(), keyword);
+    }));
+}
+
+function delay(milliseconds){
+    return new Promise(resolve => setTimeout(() => resolve(), milliseconds));
+}
+
+const crawler = ({service, keyword, searchUrl, paramName, delayTime, table}) => {
+    const visit = async (keyword, visited = {}, depth = 0) => {
+        console.log(keyword, depth);
+        const linkedKeywords = await getRelatedKeywords({
+            keyword: keyword,
+            service: service,
+            searchUrl: searchUrl,
+            paramName: paramName,
         });
-        const $html = $(response.data);
-        const $links = $html.find(".sp_keyword .lst_relate li a");
 
-        const linkedKeywords = $links.map((i, link) => $(link).text().replace(KeywordDeleteRegex,"").trim());
-        const insertList = Array.from(linkedKeywords)
-            .map(linkedKeyword => ({
-                service: service,
-                from: keyword,
-                to: linkedKeyword,
-                timestamp: bigquery.datetime(new Date().toISOString())
-            }));
+        await table.insert(linkedKeywords.map(linkedKeyword => ({
+            service: service,
+            from: keyword,
+            to: linkedKeyword,
+            timestamp: bigquery.datetime(new Date().toISOString())
+        })));
 
-        await table.insert(insertList);
-    }catch(error){
-        console.error(JSON.stringify(error));
-    }
+        await delay(delayTime);
+
+        const visitedIncludingCurrent = linkedKeywords.reduce((visited, linkedKeyword) => ({...visited, ...{[linkedKeyword]: true}}), visited);
+        const revisitFilteredKeywords = linkedKeywords.filter(linkedKeyword => !visited[linkedKeyword]);
+
+        return await revisitFilteredKeywords
+            .reduce(async (visitedPromise, linkedKeyword) => {
+                const visited = await visitedPromise;
+                return {...visited, ...await visit(linkedKeyword, visited, depth+1)};
+            }, visitedIncludingCurrent);
+    };
+
+    return visit;
+};
+
+(async () => {
+    console.log('start');
+
+    await (crawler({
+        service: 'naver',
+        searchUrl: 'https://search.naver.com/search.naver',
+        paramName: "query",
+        delayTime: 10,
+        table: { insert() {} }
+    })('아이유'));
+
+    console.log('end');
 })();
+
+
+

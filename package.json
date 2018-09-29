@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "start": "babel-node app --presets @babel/env",
+    "start": "babel-node $NODE_DEBUG_OPTION app --presets @babel/env",
     "test": "mocha app.test"
   },
   "dependencies": {
