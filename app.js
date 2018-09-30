@@ -5,7 +5,11 @@ import $ from 'cheerio'
 const bigquery = new BigQuery({projectId: 'searchkeywordstudy'});
 const getFirst = data => data[0];
 
-async function setupTable({datasetName, tableName}) {
+const delay = milliseconds => new Promise(resolve => setTimeout(() => resolve(), milliseconds));
+
+const deleteKeyword = (t, keyword) => t.replace(new RegExp(`(^| )${keyword}($| )`,"g")," ").trim();
+
+const setupTable = async ({datasetName, tableName}) => {
     const dataset = await bigquery.dataset(datasetName).get({autoCreate: true}).then(getFirst);
     const table = await dataset.table(tableName).get({autoCreate: true}).then(getFirst);
     const metaData = await table.getMetadata().then(getFirst);
@@ -18,45 +22,50 @@ async function setupTable({datasetName, tableName}) {
         });
     }
     return table;
-}
+};
 
-function deleteKeyword(t, keyword){
-    return t.replace(new RegExp(`(^| )${keyword}($| )`,"g")," ").trim()
-}
+const getRelatedKeywords = async ({service, keyword, searchUrl, paramName, proxy}) => {
+    try {
+        const response = await axios.get(searchUrl, {
+            params: {[paramName]: keyword},
+            headers: {'user-agent' : 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/69.0.3497.100 Safari/537.36'},
+            timeout: 3000,
+            proxy: proxy
+        });
 
-async function getRelatedKeywords({service, keyword, searchUrl, paramName}){
-    const userAgentString = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/69.0.3497.100 Safari/537.36';
+        const $html = $(response.data);
+        const $links = $html.find(".sp_keyword .lst_relate li a");
 
-    const response = await axios.get(searchUrl, {
-        params: {
-            [paramName]: keyword
-        },
-        headers: {
-            'user-agent' : userAgentString
-        },
-        timeout: 3000
-    });
-    const $html = $(response.data);
-    const $links = $html.find(".sp_keyword .lst_relate li a");
+        return Array.from($links.map((i, link) => {
+            return deleteKeyword($(link).text(), keyword);
+        }));
+    }catch(e){
+        console.log(e);
+        return [];
+    }
+};
 
-    return Array.from($links.map((i, link) => {
-        return deleteKeyword($(link).text(), keyword);
-    }));
-}
+const crawler = async ({service, keyword, searchUrl, paramName, delayTime, table}) => {
+    let visited = {};
+    let queue = [keyword];
 
-function delay(milliseconds){
-    return new Promise(resolve => setTimeout(() => resolve(), milliseconds));
-}
-
-const crawler = ({service, keyword, searchUrl, paramName, delayTime, table}) => {
-    const visit = async (keyword, visited = {}, depth = 0) => {
-        console.log(keyword, depth);
+    while(queue.length > 0){
+        const currentKeyword = queue.shift();
         const linkedKeywords = await getRelatedKeywords({
-            keyword: keyword,
+            keyword: currentKeyword,
             service: service,
             searchUrl: searchUrl,
-            paramName: paramName,
+            paramName: paramName
         });
+
+        const nextKeywords = linkedKeywords.filter(linkedKeyword => !visited[linkedKeyword]);
+
+        console.log(currentKeyword, "=", nextKeywords.join());
+
+        queue = queue.concat(nextKeywords);
+        visited = nextKeywords.reduce((visited, keyword) => ({...visited, ...{
+            [keyword]: (visited[keyword] || 0) + 1
+        }}), visited);
 
         await table.insert(linkedKeywords.map(linkedKeyword => ({
             service: service,
@@ -64,32 +73,21 @@ const crawler = ({service, keyword, searchUrl, paramName, delayTime, table}) => 
             to: linkedKeyword,
             timestamp: bigquery.datetime(new Date().toISOString())
         })));
-
         await delay(delayTime);
-
-        const visitedIncludingCurrent = linkedKeywords.reduce((visited, linkedKeyword) => ({...visited, ...{[linkedKeyword]: true}}), visited);
-        const revisitFilteredKeywords = linkedKeywords.filter(linkedKeyword => !visited[linkedKeyword]);
-
-        return await revisitFilteredKeywords
-            .reduce(async (visitedPromise, linkedKeyword) => {
-                const visited = await visitedPromise;
-                return {...visited, ...await visit(linkedKeyword, visited, depth+1)};
-            }, visitedIncludingCurrent);
-    };
-
-    return visit;
+    }
 };
 
 (async () => {
     console.log('start');
 
-    await (crawler({
+    await crawler({
         service: 'naver',
-        searchUrl: 'https://search.naver.com/search.naver',
+        keyword: '아이유',
+        searchUrl: 'http://search.naver.com/search.naver',
         paramName: "query",
-        delayTime: 10,
+        delayTime: 2000,
         table: { insert() {} }
-    })('아이유'));
+    });
 
     console.log('end');
 })();
